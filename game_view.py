@@ -13,11 +13,25 @@ class GamePage(QWebEnginePage):
     def __init__(self, profile, parent=None):
         super().__init__(profile, parent)
         self._blocked_back_patterns = []
+        self._screenshot_handler = None
 
     def set_blocked_back_patterns(self, patterns):
         self._blocked_back_patterns = [pattern.lower() for pattern in patterns or []]
 
+    def set_screenshot_handler(self, handler):
+        self._screenshot_handler = handler
+
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+        try:
+            if url.scheme().lower() == "lostkit":
+                target = url.host() or url.path().lstrip("/")
+                if target and target.lower().startswith("take-screenshot"):
+                    if callable(self._screenshot_handler):
+                        self._screenshot_handler()
+                    return False
+        except Exception as e:
+            print(f"Error handling custom navigation: {e}")
+
         if (nav_type == QWebEnginePage.NavigationType.BackForward and
                 self._should_block_back_forward()):
             print("Blocked back/forward navigation while on LostCity client.")
@@ -41,6 +55,7 @@ class GamePage(QWebEnginePage):
 
 class GameViewWidget(QWebEngineView):
     zoom_changed = pyqtSignal(float)
+    screenshot_requested = pyqtSignal()
     
     def __init__(self, url, parent=None):
         super().__init__(parent)
@@ -98,6 +113,7 @@ class GameViewWidget(QWebEngineView):
             page.set_blocked_back_patterns(
                 ["https://2004.lostcity.rs/client"]
             )
+            page.set_screenshot_handler(self.handle_screenshot_request)
             page.setView(self)
             self.setPage(page)
             
@@ -146,6 +162,7 @@ class GameViewWidget(QWebEngineView):
             print("✅ Game page loaded successfully with persistent storage.")
             try:
                 self.setZoomFactor(self.zoom_factor)
+                QTimer.singleShot(250, self.inject_screenshot_hook)
             except Exception as e:
                 print(f"Error setting zoom factor: {e}")
         else:
@@ -285,6 +302,78 @@ class GameViewWidget(QWebEngineView):
         except Exception as e:
             print(f"Error evaluating current game URL: {e}")
             return False
+
+    def handle_screenshot_request(self):
+        """Emit a signal so the main window can capture the screenshot."""
+        try:
+            self.screenshot_requested.emit()
+        except Exception as e:
+            print(f"Error emitting screenshot signal: {e}")
+
+    def inject_screenshot_hook(self):
+        """Inject JavaScript that routes the in-game Take screenshot link to LostKit."""
+        if not self._should_block_navigation_buttons():
+            return
+        script = """
+            (function() {
+                const TARGET_TEXT = 'take screenshot';
+                function attach() {
+                    if (!document.body) {
+                        return false;
+                    }
+                    const nodes = Array.from(document.querySelectorAll('a, button, span, div'));
+                    const target = nodes.find(function(el) {
+                        if (!el || !el.textContent) { return false; }
+                        return el.textContent.trim().toLowerCase() === TARGET_TEXT;
+                    });
+                    if (!target) {
+                        return false;
+                    }
+                    if (target.__lostkitScreenshotAttached === true) {
+                        return true;
+                    }
+                    function handler(event) {
+                        try {
+                            event.preventDefault();
+                        } catch (err) {}
+                        try {
+                            window.location.href = 'lostkit://take-screenshot';
+                        } catch (err) {}
+                        return false;
+                    }
+                    if (target.tagName && target.tagName.toLowerCase() === 'a') {
+                        try {
+                            target.setAttribute('href', 'lostkit://take-screenshot');
+                        } catch (err) {}
+                    }
+                    target.addEventListener('click', handler);
+                    target.__lostkitScreenshotAttached = true;
+                    return true;
+                }
+                function setupObserver() {
+                    try {
+                        const observer = new MutationObserver(function() {
+                            if (attach()) {
+                                observer.disconnect();
+                            }
+                        });
+                        observer.observe(document.body, { childList: true, subtree: true });
+                    } catch (err) {}
+                }
+                if (!attach()) {
+                    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+                        setupObserver();
+                    } else {
+                        window.addEventListener('DOMContentLoaded', attach);
+                        setupObserver();
+                    }
+                }
+            })();
+        """
+        try:
+            self.page().runJavaScript(script)
+        except Exception as e:
+            print(f"Error injecting screenshot hook: {e}")
 
     def get_zoom_percentage(self):
         """Get current zoom as percentage string"""

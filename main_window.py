@@ -3,6 +3,8 @@ import gc
 import time
 import uuid
 import re
+from datetime import datetime
+from pathlib import Path
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QSplitter, 
                              QVBoxLayout, QTabWidget, QPushButton, QLabel)
 from PyQt6.QtCore import Qt, QTimer, QUrl
@@ -15,6 +17,10 @@ import config
 from styles import get_main_stylesheet, get_icon_path
 from font_loader import font_loader
 import os
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 
 class MainWindow(QMainWindow):
@@ -37,6 +43,7 @@ class MainWindow(QMainWindow):
         self.header_widget = None
         self.status_label = None
         self.reload_button = None
+        self.screenshot_dir = Path(__file__).resolve().parent / "LCScreenshots"
         
         # Window state management
         self.is_closing = False
@@ -174,6 +181,52 @@ class MainWindow(QMainWindow):
             print(f"Error reloading game view: {e}")
             self.reload_button.setEnabled(True)
             QTimer.singleShot(500, lambda: self.update_header_status())
+
+    def capture_screenshot(self):
+        """Capture the current game view and save it to the LCScreenshots directory."""
+        if not hasattr(self, "game_view") or self.game_view is None:
+            print("Screenshot aborted: game view is unavailable.")
+            return
+
+        try:
+            target_dir = self.screenshot_dir
+            if not target_dir.exists():
+                target_dir.mkdir(parents=True, exist_ok=True)
+                print(f"Created screenshot directory at {target_dir}")
+
+            timestamp = self._generate_screenshot_timestamp()
+            file_path = target_dir / f"LC_{timestamp}.png"
+
+            pixmap = self.game_view.grab()
+            if pixmap.isNull():
+                print("Screenshot aborted: captured pixmap is empty.")
+                return
+
+            if pixmap.save(str(file_path), "PNG"):
+                print(f"Screenshot saved to {file_path}")
+            else:
+                print(f"Failed to save screenshot to {file_path}")
+        except Exception as e:
+            print(f"Error capturing screenshot: {e}")
+
+    def _generate_screenshot_timestamp(self):
+        """Generate a timestamp in the required Lost City format."""
+        if ZoneInfo is not None:
+            try:
+                now = datetime.now(ZoneInfo("America/New_York"))
+            except Exception:
+                now = datetime.now()
+        else:
+            now = datetime.now()
+        month = now.strftime("%B")
+        day = str(now.day)
+        year = str(now.year)
+        hour_12 = str(now.hour % 12 or 12)
+        minute = f"{now.minute:02d}"
+        second = f"{now.second:02d}"
+        meridiem = now.strftime("%p")
+        tz_abbr = now.tzname() or "EDT"
+        return f"{month}-{day}-{year}-{hour_12}-{minute}-{second}-{meridiem}-{tz_abbr}"
 
     def update_header_status(self, world_info=None, saved_now=False):
         """Refresh the header label with current world info and last save time."""
@@ -377,6 +430,7 @@ class MainWindow(QMainWindow):
         
         self.game_view = GameViewWidget(game_url)
         self.game_view.instance_id = self.instance_id
+        self.game_view.screenshot_requested.connect(self.capture_screenshot)
         
         # Connect to URL changes to update world info
         self.game_view.page().urlChanged.connect(self.on_game_url_changed)
