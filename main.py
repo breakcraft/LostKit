@@ -44,10 +44,19 @@ def cleanup_temp_files():
 def setup_application_paths():
     """Setup proper application data paths"""
     try:
+        qt_app_data = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+        if qt_app_data:
+            print(f"Qt suggested AppData location: {qt_app_data}")
+        
         # Ensure persistent storage directories exist
         app_data_dir = config.get_app_data_dir()
         cache_dir = config.get_persistent_cache_dir()
         storage_dir = config.get_persistent_storage_dir()
+
+        for dir_path in (app_data_dir, cache_dir, storage_dir):
+            qdir = QDir(dir_path)
+            if not qdir.exists():
+                qdir.mkpath(".")
         
         print(f"App data directory: {app_data_dir}")
         print(f"Cache directory: {cache_dir}")
@@ -71,8 +80,10 @@ def main():
     try:
         # Change to the directory where the script is located
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        os.chdir(script_dir)
-        print(f"Working directory: {script_dir}")
+        if not QDir.setCurrent(script_dir):
+            print("Warning: QDir failed to change directory, falling back to os.chdir")
+            os.chdir(script_dir)
+        print(f"Working directory: {QDir.currentPath()}")
         
         # Setup application paths and persistent storage
         setup_application_paths()

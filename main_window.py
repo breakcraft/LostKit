@@ -32,6 +32,11 @@ class MainWindow(QMainWindow):
         
         # Load config - ensure proper restoration
         self.config = config.load_config()
+        self._header_world_info = self.config.get("current_world_info", "No world")
+        self.last_config_save_ts = time.time()
+        self.header_widget = None
+        self.status_label = None
+        self.reload_button = None
         
         # Window state management
         self.is_closing = False
@@ -44,7 +49,22 @@ class MainWindow(QMainWindow):
         
         # Set black background
         palette = QPalette()
-        palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0))
+        applied_brush = False
+        background_image = "button.jpg"
+        if os.path.exists(background_image):
+            background_pixmap = QPixmap(background_image)
+            if not background_pixmap.isNull():
+                scaled_pixmap = background_pixmap.scaled(
+                    800,
+                    800,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                palette.setBrush(QPalette.ColorRole.Window, QBrush(scaled_pixmap))
+                applied_brush = True
+        if not applied_brush:
+            palette.setBrush(QPalette.ColorRole.Window, QBrush(QColor(0, 0, 0)))
+        self.setAutoFillBackground(True)
         self.setPalette(palette)
         
         # Apply updated stylesheet with custom font
@@ -58,6 +78,10 @@ class MainWindow(QMainWindow):
         self.main_layout = QVBoxLayout(central_widget)
         self.main_layout.setContentsMargins(8, 8, 8, 8)
         self.main_layout.setSpacing(8)
+
+        # Header bar with status information
+        self.create_header_bar()
+        self.main_layout.addWidget(self.header_widget)
 
         # Create main horizontal splitter
         self.main_horizontal_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -112,6 +136,66 @@ class MainWindow(QMainWindow):
         self.apply_font_to_widget_tree(self, font)
         
         print(f"Applied {font.pointSize()}pt font ({font.family()}) to all UI elements")
+
+    def create_header_bar(self):
+        """Create the header bar that shows world info and save status."""
+        self.header_widget = QWidget()
+        header_layout = QHBoxLayout(self.header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+
+        self.status_label = QLabel()
+        self.status_label.setObjectName("header_status_label")
+        self.status_label.setStyleSheet("""
+            QLabel {
+                color: #f5e6c0;
+                font-weight: bold;
+            }
+        """)
+        header_layout.addWidget(self.status_label, 1)
+
+        self.reload_button = QPushButton("Reload Game")
+        self.reload_button.setToolTip("Reload the LostCity client if it becomes unresponsive.")
+        self.reload_button.clicked.connect(self.reload_game_view)
+        self.reload_button.setFixedHeight(32)
+        header_layout.addWidget(self.reload_button, 0)
+
+    def reload_game_view(self):
+        """Reload the in-game view while providing button feedback."""
+        if not hasattr(self, "game_view") or self.game_view is None:
+            return
+        try:
+            self.reload_button.setEnabled(False)
+            self.status_label.setText("Reloading game client...")
+            self.game_view.reload()
+            QTimer.singleShot(2000, lambda: self.reload_button.setEnabled(True))
+            QTimer.singleShot(2500, lambda: self.update_header_status())
+        except Exception as e:
+            print(f"Error reloading game view: {e}")
+            self.reload_button.setEnabled(True)
+            QTimer.singleShot(500, lambda: self.update_header_status())
+
+    def update_header_status(self, world_info=None, saved_now=False):
+        """Refresh the header label with current world info and last save time."""
+        if self.status_label is None:
+            return
+
+        if world_info is not None:
+            self._header_world_info = world_info
+        else:
+            world_info = self._header_world_info
+
+        if saved_now or not hasattr(self, "last_config_save_ts"):
+            self.last_config_save_ts = time.time()
+
+        if self.last_config_save_ts:
+            save_display = time.strftime("%I:%M:%S %p", time.localtime(self.last_config_save_ts))
+        else:
+            save_display = "—"
+
+        display_text = f"World: {world_info} • Last save: {save_display}"
+        self.status_label.setText(display_text)
+        self.status_label.setToolTip(f"Last configuration save at {save_display}")
 
     def apply_font_to_widget_tree(self, widget, font):
         """Recursively apply font to widget and all its children"""
@@ -170,6 +254,7 @@ class MainWindow(QMainWindow):
             try:
                 self.save_current_state_to_config()
                 config.force_save_config()
+                self.update_header_status(saved_now=True)
                 print("Periodic config save completed")
             except Exception as e:
                 print(f"Error in periodic config save: {e}")
@@ -341,6 +426,7 @@ class MainWindow(QMainWindow):
 
         # Add to main layout
         self.main_layout.addWidget(self.main_horizontal_splitter)
+        self.update_header_status(self._header_world_info)
 
     def on_panel_collapse_requested(self, expanded):
         """Handle panel expand request"""
@@ -461,6 +547,7 @@ class MainWindow(QMainWindow):
         
         # Update world info display in right panel
         self.tools_panel.update_world_info(world_info)
+        self.update_header_status(world_info)
         
         # Save the selected world to config
         config.set_config_value("last_world_url", world_url)
@@ -474,6 +561,7 @@ class MainWindow(QMainWindow):
         world_match = re.search(r'world[=:](\d+)', url_string, re.IGNORECASE)
         if not world_match:
             self.tools_panel.update_world_info("No world")
+            self.update_header_status("No world")
             return
         
         world_num = world_match.group(1)
@@ -485,6 +573,7 @@ class MainWindow(QMainWindow):
         # Only show world info if we have both a world number and detail mode
         if not is_high_detail and not is_low_detail:
             self.tools_panel.update_world_info("No world")
+            self.update_header_status("No world")
             return
         
         detail_text = "HD" if is_high_detail else "LD"
@@ -506,6 +595,7 @@ class MainWindow(QMainWindow):
         world_info = f"W{world_num} {location} ({detail_text})"
         
         self.tools_panel.update_world_info(world_info)
+        self.update_header_status(world_info)
         
         # Save to config
         config.set_config_value("last_world_url", url_string)
@@ -592,6 +682,7 @@ class MainWindow(QMainWindow):
         try:
             self.save_current_state_to_config()
             config.save_config(self.config)
+            self.update_header_status(saved_now=True)
             print("Window state saved to config")
         except Exception as e:
             print(f"Error saving window state: {e}")

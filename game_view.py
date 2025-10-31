@@ -54,6 +54,13 @@ class GameViewWidget(QWebEngineView):
             # Use persistent directories that survive application restarts
             cache_path = config.get_persistent_cache_path("game_cache")
             storage_path = config.get_persistent_profile_path("game_profile")
+
+            cache_dir = QDir(cache_path)
+            if not cache_dir.exists():
+                cache_dir.mkpath(".")
+            storage_dir = QDir(storage_path)
+            if not storage_dir.exists():
+                storage_dir.mkpath(".")
             
             print(f"Game using persistent cache: {cache_path}")
             print(f"Game using persistent storage: {storage_path}")

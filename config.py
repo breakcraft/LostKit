@@ -58,6 +58,7 @@ DEFAULT_CONFIG = {
     "chat_panel_visible": True,
     "chat_panel_height": 200,
     "chat_zoom_factor": 0.8,
+    "current_world_info": "No world",
     "resource_optimization": True,
     "cache_cleanup_interval": 300,
     "max_tool_windows": 10,

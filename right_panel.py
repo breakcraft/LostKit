@@ -250,9 +250,10 @@ class RightToolsPanel(QWidget):
         
         self.config = load_config()
         
-        # CHANGE: Use normal dict instead of weakref for better control
-        self.tool_windows = {}  # key: tool_name, value: ToolWindow instance
+        self.tool_windows = weakref.WeakValueDictionary()
         self.window_count = 0
+        self.world_info_timestamp = time.time()
+        self.last_tool_cleanup = time.time()
         
         self.world_switcher_window = None
         self.current_world_info = "No world"  # Default to "No world" on startup
@@ -450,6 +451,7 @@ class RightToolsPanel(QWidget):
                 border: 2px inset #2a2a2a;
             }
         """)
+        self.apply_world_switcher_icon()
         main_layout.addWidget(self.world_switcher_btn)
         
         # IRC Chat toggle button
@@ -538,7 +540,7 @@ class RightToolsPanel(QWidget):
     def create_world_info_display(self):
         """Create the world info display widget with button.jpg background and larger, readable text"""
         world_label = QLabel(self.current_world_info)
-        world_label.setFixedHeight(55)  # Increased height for better text display
+        world_label.setFixedHeight(65)  # Increased height for better text display
         world_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         world_label.setWordWrap(True)
         
@@ -552,7 +554,7 @@ class RightToolsPanel(QWidget):
                     padding: 6px 8px;
                     color: #f5e6c0;
                     font-weight: bold;
-                    font-size: 18px;  /* Increased font size for readability */
+                    font-size: 26px;  /* Increased font size for readability */
                 }}
             """)
         else:
@@ -564,18 +566,65 @@ class RightToolsPanel(QWidget):
                     padding: 6px 8px;
                     color: #f5e6c0;
                     font-weight: bold;
-                    font-size: 18px;  /* Increased font size for readability */
+                    font-size: 26px;  /* Increased font size for readability */
                 }
             """)
         
+        if hasattr(self, "world_info_timestamp"):
+            try:
+                tooltip_time = time.strftime("%I:%M:%S %p", time.localtime(self.world_info_timestamp))
+                world_label.setToolTip(f"Updated {tooltip_time}")
+            except Exception:
+                world_label.setToolTip("World information")
+        else:
+            world_label.setToolTip("World information")
+        
         return world_label
+    
+    def apply_world_switcher_icon(self):
+        """Apply a crisp icon to the world switcher button using QPixmap scaling."""
+        try:
+            icon_path = get_icon_path("World Map")
+            if not isinstance(icon_path, str) or not icon_path.endswith(".png"):
+                return
+            if not os.path.exists(icon_path):
+                return
+
+            pixmap = QPixmap(icon_path)
+            if pixmap.isNull():
+                return
+
+            icon_size = QSize(26, 26)
+            scaled_pixmap = pixmap.scaled(
+                icon_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.world_switcher_btn.setIcon(QIcon(scaled_pixmap))
+            self.world_switcher_btn.setIconSize(icon_size)
+        except Exception as e:
+            print(f"Error applying world switcher icon: {e}")
     
     def update_world_info(self, world_info):
         """Update the world info display"""
         self.current_world_info = world_info
+        self.world_info_timestamp = time.time()
         
         if hasattr(self, 'world_info_label') and self.world_info_label:
             self.world_info_label.setText(world_info)
+            try:
+                tooltip_time = time.strftime("%I:%M:%S %p", time.localtime(self.world_info_timestamp))
+                self.world_info_label.setToolTip(f"Updated {tooltip_time}")
+            except Exception:
+                self.world_info_label.setToolTip("World information")
+        self.config["current_world_info"] = world_info
+        
+        try:
+            config_data = load_config()
+            config_data["current_world_info"] = world_info
+            save_config(config_data)
+        except Exception as e:
+            print(f"Error persisting world info: {e}")
     
     def open_world_switcher(self):
         """Open or focus the world switcher window"""
@@ -747,7 +796,7 @@ class RightToolsPanel(QWidget):
                 tool_window.closed.connect(lambda: self.on_tool_window_closed(name))
                 tool_window.show()
                 self.tool_windows[name] = tool_window
-                self.window_count += 1
+                self.window_count = len(self.tool_windows)
             except Exception as e:
                 print(f"Error creating tool window: {e}")
         else:
@@ -758,6 +807,7 @@ class RightToolsPanel(QWidget):
         if tool_name in self.tool_windows:
             del self.tool_windows[tool_name]
             print(f"Removed {tool_name} from tool windows tracking")
+        self.window_count = len(self.tool_windows)
 
     def cleanup_dead_windows(self):
         dead_keys = []
@@ -771,6 +821,9 @@ class RightToolsPanel(QWidget):
         for key in dead_keys:
             if key in self.tool_windows:
                 del self.tool_windows[key]
+        if dead_keys:
+            self.last_tool_cleanup = time.time()
+            self.window_count = len(self.tool_windows)
             
     def toggle_external_mode(self, state):
         external = state == Qt.CheckState.Checked.value
