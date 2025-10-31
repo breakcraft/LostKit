@@ -5,6 +5,8 @@ import base64
 from pathlib import Path
 from datetime import datetime
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWidgets import QToolTip
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings, QWebEngineScript
 from PyQt6.QtCore import Qt, QUrl, QDir, pyqtSignal, QTimer, QEvent
 try:
