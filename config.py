@@ -62,6 +62,12 @@ DEFAULT_CONFIG = {
     "resource_optimization": True,
     "cache_cleanup_interval": 300,
     "max_tool_windows": 10,
+    # Logging and screenshot behavior
+    "click_logging_enabled": True,
+    "click_log_to_file": True,
+    "screenshot_hotkey_enabled": True,
+    "screenshot_toast_enabled": True,
+    "screenshot_toast_ms": 2000,
     # Individual tool window geometries
 }
 
@@ -118,6 +124,17 @@ def load_config():
                 config["chat_panel_visible"] = bool(config.get("chat_panel_visible", True))
                 config["resource_optimization"] = bool(config.get("resource_optimization", True))
                 config["right_panel_collapsed"] = bool(config.get("right_panel_collapsed", False))
+                config["click_logging_enabled"] = bool(config.get("click_logging_enabled", True))
+                config["click_log_to_file"] = bool(config.get("click_log_to_file", True))
+                config["screenshot_hotkey_enabled"] = bool(config.get("screenshot_hotkey_enabled", True))
+                config["screenshot_toast_enabled"] = bool(config.get("screenshot_toast_enabled", True))
+
+                # Validate toast duration
+                try:
+                    ms = int(config.get("screenshot_toast_ms", 2000))
+                    config["screenshot_toast_ms"] = max(500, min(ms, 10000))
+                except Exception:
+                    config["screenshot_toast_ms"] = 2000
                 
             except Exception as e:
                 print(f"Error loading config: {e}. Using defaults.")
