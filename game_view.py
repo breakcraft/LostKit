@@ -128,6 +128,15 @@ class GameViewWidget(QWebEngineView):
         super().__init__(parent)
 
         try:
+            # Feature toggles from config
+            self.click_logging_enabled = bool(config.get_config_value("click_logging_enabled", True))
+            self.click_log_to_file = bool(config.get_config_value("click_log_to_file", True))
+            self.screenshot_hotkey_enabled = bool(config.get_config_value("screenshot_hotkey_enabled", True))
+            self.screenshot_toast_enabled = bool(config.get_config_value("screenshot_toast_enabled", True))
+            try:
+                self.screenshot_toast_ms = int(config.get_config_value("screenshot_toast_ms", 2000))
+            except Exception:
+                self.screenshot_toast_ms = 2000
             # Use persistent profile that survives application restarts
             profile_name = "LostCityGame"  # Fixed name, no process ID
             
@@ -181,7 +190,8 @@ class GameViewWidget(QWebEngineView):
                 ["https://2004.lostcity.rs/client"]
             )
             page.set_screenshot_handler(self.handle_screenshot_request)
-            page.set_click_log_handler(self._handle_click_log)
+            if self.click_logging_enabled:
+                page.set_click_log_handler(self._handle_click_log)
             # QWebEnginePage has no setView() in PyQt6; binding to the view is done via setPage()
             self.setPage(page)
 
@@ -204,8 +214,9 @@ class GameViewWidget(QWebEngineView):
 
             # Install screenshot hook script to run on all frames
             self.install_screenshot_script()
-            # Install click logger across all frames
-            self.install_click_logger_script()
+            # Install click logger across all frames (if enabled)
+            if self.click_logging_enabled:
+                self.install_click_logger_script()
 
             # Connect signals
             self.page().loadFinished.connect(self.on_load_finished)
@@ -254,6 +265,17 @@ class GameViewWidget(QWebEngineView):
     def wheelEvent(self, event):
         """Handle mouse wheel events for zooming"""
         try:
+            # Hotkey: Ctrl+Shift+S for screenshot
+            try:
+                if getattr(self, 'screenshot_hotkey_enabled', True):
+                    mods = event.modifiers()
+                    if (mods & Qt.KeyboardModifier.ControlModifier) and (mods & Qt.KeyboardModifier.ShiftModifier) and event.key() == Qt.Key.Key_S:
+                        self.handle_screenshot_request()
+                        event.accept()
+                        return
+            except Exception:
+                pass
+
             if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
                 delta = event.angleDelta().y()
                 zoom_step = 0.1
@@ -565,6 +587,10 @@ class GameViewWidget(QWebEngineView):
 
             if applied:
                 print(f"Redirected download to {target_dir} as {filename}")
+                try:
+                    self._show_screenshot_toast(str(target_dir / filename))
+                except Exception:
+                    pass
             else:
                 print("Could not apply download redirection; download may go to default location.")
         except Exception as e:
@@ -638,6 +664,10 @@ class GameViewWidget(QWebEngineView):
                     with open(out_path, 'wb') as f:
                         f.write(data)
                     print(f'Canvas screenshot saved to {out_path}')
+                    try:
+                        self._show_screenshot_toast(str(out_path))
+                    except Exception:
+                        pass
                 except Exception as e:
                     print('Error writing canvas screenshot:', e)
                     self._fallback_grab_to_file()
@@ -659,10 +689,25 @@ class GameViewWidget(QWebEngineView):
             out_path = target_dir / f'LC_{ts}.png'
             if pm.save(str(out_path), 'PNG'):
                 print(f'Fallback view.grab screenshot saved to {out_path}')
+                try:
+                    self._show_screenshot_toast(str(out_path))
+                except Exception:
+                    pass
             else:
                 print('Fallback view.grab save failed')
         except Exception as e:
             print('Error in fallback grab:', e)
+
+    def _show_screenshot_toast(self, path_str):
+        try:
+            if not getattr(self, 'screenshot_toast_enabled', True):
+                return
+            msg = f"Screenshot saved\n{path_str}"
+            pos = QCursor.pos()
+            ms = getattr(self, 'screenshot_toast_ms', 2000)
+            QToolTip.showText(pos, msg, self, self.rect(), ms)
+        except Exception:
+            pass
 
     def inject_screenshot_hook(self):
         """Inject JavaScript that routes the in-game Take screenshot link to LostKit."""
@@ -882,6 +927,9 @@ class GameViewWidget(QWebEngineView):
     def _handle_click_log(self, json_text: str):
         """Append click-log JSON line to logs/clicks.jsonl and echo to console."""
         try:
+            if not getattr(self, 'click_log_to_file', True):
+                print(f"CLICK {json_text}")
+                return
             logs_dir = Path(__file__).resolve().parent / 'logs'
             logs_dir.mkdir(parents=True, exist_ok=True)
             log_path = logs_dir / 'clicks.jsonl'
