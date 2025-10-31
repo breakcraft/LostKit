@@ -1,9 +1,16 @@
 # game_view.py - Fixed syntax error on line 199
 import gc
 import os
+import base64
+from pathlib import Path
+from datetime import datetime
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings
+from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings, QWebEngineScript
 from PyQt6.QtCore import Qt, QUrl, QDir, pyqtSignal, QTimer
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 import config
 
 
@@ -116,6 +123,12 @@ class GameViewWidget(QWebEngineView):
             page.set_screenshot_handler(self.handle_screenshot_request)
             page.setView(self)
             self.setPage(page)
+
+            # Route all downloads (e.g., game client screenshots) to LCScreenshots
+            try:
+                profile.downloadRequested.connect(self.on_download_requested)
+            except Exception as e:
+                print(f"Warning: Could not connect downloadRequested: {e}")
             
             # Store paths for cleanup (but don't delete persistent data)
             self.cache_path = cache_path
@@ -127,6 +140,9 @@ class GameViewWidget(QWebEngineView):
             # Load zoom factor from config
             self.zoom_factor = config.get_config_value("zoom_factor", 1.0)
             self.setZoomFactor(self.zoom_factor)
+
+            # Install screenshot hook script to run on all frames
+            self.install_screenshot_script()
 
             # Connect signals
             self.page().loadFinished.connect(self.on_load_finished)
@@ -303,77 +319,370 @@ class GameViewWidget(QWebEngineView):
             print(f"Error evaluating current game URL: {e}")
             return False
 
-    def handle_screenshot_request(self):
-        """Emit a signal so the main window can capture the screenshot."""
+    def _lc_timestamp(self):
         try:
-            self.screenshot_requested.emit()
+            if ZoneInfo is not None:
+                now = datetime.now(ZoneInfo("America/New_York"))
+            else:
+                now = datetime.now()
+            month = now.strftime("%B")
+            day = str(now.day)
+            year = str(now.year)
+            hour_12 = str(now.hour % 12 or 12)
+            minute = f"{now.minute:02d}"
+            second = f"{now.second:02d}"
+            meridiem = now.strftime("%p")
+            tz_abbr = now.tzname() or "EDT"
+            return f"{month}-{day}-{year}-{hour_12}-{minute}-{second}-{meridiem}-{tz_abbr}"
+        except Exception:
+            return datetime.now().strftime("%B-%d-%Y-%I-%M-%S-%p-EDT")
+
+    def on_download_requested(self, download):
+        """Force any game-initiated downloads (e.g., screenshots) into LCScreenshots with LC_ timestamp name."""
+        try:
+            # Determine target directory next to this file (repo root)
+            target_dir = Path(__file__).resolve().parent / "LCScreenshots"
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            # Best-effort read suggested name and extension across Qt versions
+            suggested = None
+            try:
+                # Qt6: method downloadFileName() may be a function
+                suggested = download.downloadFileName() if callable(getattr(download, 'downloadFileName', None)) else getattr(download, 'downloadFileName', None)
+            except Exception:
+                pass
+            if not suggested:
+                try:
+                    suggested = download.path() if callable(getattr(download, 'path', None)) else getattr(download, 'path', None)
+                except Exception:
+                    suggested = None
+            if not suggested:
+                try:
+                    suggested = download.url().fileName()  # fallback
+                except Exception:
+                    suggested = None
+
+            # Normalize extension
+            ext = ".png"
+            try:
+                if suggested:
+                    base = os.path.basename(str(suggested))
+                    suffix = os.path.splitext(base)[1]
+                    if suffix:
+                        ext = suffix
+            except Exception:
+                pass
+
+            filename = f"LC_{self._lc_timestamp()}{ext}"
+
+            # Apply target path according to available API
+            applied = False
+            try:
+                if hasattr(download, 'setDownloadDirectory') and hasattr(download, 'setDownloadFileName'):
+                    download.setDownloadDirectory(str(target_dir))
+                    download.setDownloadFileName(filename)
+                    download.accept()
+                    applied = True
+            except Exception as e:
+                print(f"Download API (Qt6) failed: {e}")
+
+            if not applied:
+                try:
+                    # PyQt5 style
+                    full_path = target_dir / filename
+                    if hasattr(download, 'setPath'):
+                        download.setPath(str(full_path))
+                        download.accept()
+                        applied = True
+                except Exception as e:
+                    print(f"Download API (Qt5) failed: {e}")
+
+            if applied:
+                print(f"Redirected download to {target_dir} as {filename}")
+            else:
+                print("Could not apply download redirection; download may go to default location.")
         except Exception as e:
-            print(f"Error emitting screenshot signal: {e}")
+            print(f"Error in on_download_requested: {e}")
+
+    def handle_screenshot_request(self):
+        """Capture the canvas directly and save to LCScreenshots."""
+        try:
+            self.capture_canvas_to_file()
+        except Exception as e:
+            print(f"Error handling screenshot request: {e}")
+
+    def capture_canvas_to_file(self):
+        """Capture the in-page canvas via toDataURL and write a PNG file."""
+        try:
+            script = """
+                (function(){
+                    function findCanvas(win) {
+                        try {
+                            var d = win.document;
+                            var c = d && d.getElementById ? d.getElementById('canvas') : null;
+                            if (c) return c;
+                            if (!win.frames) return null;
+                            for (var i=0;i<win.frames.length;i++) {
+                                try {
+                                    var r = findCanvas(win.frames[i]);
+                                    if (r) return r;
+                                } catch (e) {}
+                            }
+                            return null;
+                        } catch (e) {
+                            return null;
+                        }
+                    }
+                    try {
+                        var c = findCanvas(window);
+                        if (!c) { return '__ERR__:no-canvas'; }
+                        var data = c.toDataURL('image/png');
+                        if (!data || typeof data !== 'string' || data.indexOf('data:') !== 0) {
+                            return '__ERR__:no-dataurl';
+                        }
+                        return data;
+                    } catch (e) {
+                        return '__ERR__:'+ (e && e.toString ? e.toString() : 'unknown');
+                    }
+                })();
+            """
+            def _cb(result):
+                try:
+                    if not isinstance(result, str):
+                        print('Screenshot JS result invalid; falling back to view.grab')
+                        return self._fallback_grab_to_file()
+                    if result.startswith('__ERR__:'):
+                        print('Canvas screenshot error:', result)
+                        return self._fallback_grab_to_file()
+                    # Parse data URL
+                    prefix = 'base64,'
+                    idx = result.find(prefix)
+                    if idx == -1:
+                        print('No base64 in data URL; falling back to view.grab')
+                        return self._fallback_grab_to_file()
+                    b64 = result[idx+len(prefix):]
+                    data = base64.b64decode(b64)
+                    # Ensure dir
+                    target_dir = Path(__file__).resolve().parent / 'LCScreenshots'
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    # Name
+                    ts = self._lc_timestamp() if hasattr(self, '_lc_timestamp') else 'capture'
+                    filename = f'LC_{ts}.png'
+                    out_path = target_dir / filename
+                    with open(out_path, 'wb') as f:
+                        f.write(data)
+                    print(f'Canvas screenshot saved to {out_path}')
+                except Exception as e:
+                    print('Error writing canvas screenshot:', e)
+                    self._fallback_grab_to_file()
+
+            self.page().runJavaScript(script, _cb)
+        except Exception as e:
+            print(f'Error starting canvas capture: {e}')
+            self._fallback_grab_to_file()
+
+    def _fallback_grab_to_file(self):
+        try:
+            pm = self.grab()
+            if pm.isNull():
+                print('Fallback grab failed: pixmap is null')
+                return
+            target_dir = Path(__file__).resolve().parent / 'LCScreenshots'
+            target_dir.mkdir(parents=True, exist_ok=True)
+            ts = self._lc_timestamp() if hasattr(self, '_lc_timestamp') else 'capture'
+            out_path = target_dir / f'LC_{ts}.png'
+            if pm.save(str(out_path), 'PNG'):
+                print(f'Fallback view.grab screenshot saved to {out_path}')
+            else:
+                print('Fallback view.grab save failed')
+        except Exception as e:
+            print('Error in fallback grab:', e)
 
     def inject_screenshot_hook(self):
         """Inject JavaScript that routes the in-game Take screenshot link to LostKit."""
         if not self._should_block_navigation_buttons():
             return
+        print("Injecting screenshot hook into game page…")
         script = """
             (function() {
-                const TARGET_TEXT = 'take screenshot';
-                function attach() {
-                    if (!document.body) {
+                const CUSTOM_URL = 'lostkit://take-screenshot';
+
+                function triggerLostKit() {
+                    try { window.location.href = CUSTOM_URL; } catch (err) {}
+                }
+
+                function attachTo(el) {
+                    if (!el || el.__lostkitScreenshotAttached) { return false; }
+                    function handler(ev) {
+                        try { ev.preventDefault(); } catch (e) {}
+                        try { ev.stopPropagation(); } catch (e) {}
+                        try { ev.stopImmediatePropagation(); } catch (e) {}
+                        triggerLostKit();
                         return false;
                     }
-                    const nodes = Array.from(document.querySelectorAll('a, button, span, div'));
-                    const target = nodes.find(function(el) {
-                        if (!el || !el.textContent) { return false; }
-                        return el.textContent.trim().toLowerCase() === TARGET_TEXT;
-                    });
-                    if (!target) {
-                        return false;
-                    }
-                    if (target.__lostkitScreenshotAttached === true) {
-                        return true;
-                    }
-                    function handler(event) {
-                        try {
-                            event.preventDefault();
-                        } catch (err) {}
-                        try {
-                            window.location.href = 'lostkit://take-screenshot';
-                        } catch (err) {}
-                        return false;
-                    }
-                    if (target.tagName && target.tagName.toLowerCase() === 'a') {
-                        try {
-                            target.setAttribute('href', 'lostkit://take-screenshot');
-                        } catch (err) {}
-                    }
-                    target.addEventListener('click', handler);
-                    target.__lostkitScreenshotAttached = true;
+                    el.addEventListener('click', handler, true);
+                    try { el.onclick = handler; } catch (e) {}
+                    try { el.setAttribute('href', CUSTOM_URL); } catch (e) {}
+                    el.__lostkitScreenshotAttached = true;
                     return true;
                 }
-                function setupObserver() {
-                    try {
-                        const observer = new MutationObserver(function() {
-                            if (attach()) {
-                                observer.disconnect();
+
+                function attachById() {
+                    return attachTo(document.getElementById('screenshot'));
+                }
+
+                function attachByText() {
+                    const nodes = Array.from(document.querySelectorAll('a,button,span,div'));
+                    for (const el of nodes) {
+                        try {
+                            if (!el || !el.textContent) continue;
+                            if (el.textContent.trim().toLowerCase() === 'take screenshot') {
+                                if (attachTo(el)) return true;
                             }
-                        });
-                        observer.observe(document.body, { childList: true, subtree: true });
-                    } catch (err) {}
-                }
-                if (!attach()) {
-                    if (document.readyState === 'complete' || document.readyState === 'interactive') {
-                        setupObserver();
-                    } else {
-                        window.addEventListener('DOMContentLoaded', attach);
-                        setupObserver();
+                        } catch (e) {}
                     }
+                    return false;
                 }
+
+                function attachByOnClick() {
+                    const nodes = Array.from(document.querySelectorAll('[onclick]'));
+                    for (const el of nodes) {
+                        try {
+                            const val = String(el.getAttribute('onclick')||'').toLowerCase();
+                            if (val.indexOf('savescreenshot') !== -1) {
+                                if (attachTo(el)) return true;
+                            }
+                        } catch (e) {}
+                    }
+                    return false;
+                }
+
+                function overrideSaveScreenshot() {
+                    try {
+                        const original = window.saveScreenshot;
+                        window.saveScreenshot = function() { triggerLostKit(); return undefined; };
+                        window.saveScreenshot.__lostkitWrapped = true;
+                    } catch (e) {}
+                }
+
+                function overrideCandidates() {
+                    ['takeScreenshot','take_screenshot','TakeScreenshot'].forEach(function(name){
+                        try { window[name] = function(){ triggerLostKit(); return undefined; }; } catch (e) {}
+                    });
+                }
+
+                function install() {
+                    overrideSaveScreenshot();
+                    overrideCandidates();
+                    if (attachById()) return;
+                    if (attachByText()) return;
+                    attachByOnClick();
+                }
+
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', install);
+                } else {
+                    install();
+                }
+
+                try {
+                    var ELEMENT_NODE = (window.Node && Node.ELEMENT_NODE) || 1;
+                    const obs = new MutationObserver(function(muts){
+                        let attached = false;
+                        for (const m of muts) {
+                            for (const n of m.addedNodes) {
+                                if ((n.nodeType||ELEMENT_NODE) === ELEMENT_NODE) {
+                                    if (attachById() || attachByText() || attachByOnClick()) { attached = true; break; }
+                                }
+                            }
+                            if (attached) break;
+                        }
+                        overrideSaveScreenshot();
+                        overrideCandidates();
+                    });
+                    obs.observe(document.documentElement||document.body, {childList:true,subtree:true});
+                } catch (e) {}
             })();
         """
         try:
             self.page().runJavaScript(script)
         except Exception as e:
             print(f"Error injecting screenshot hook: {e}")
+
+    def install_screenshot_script(self):
+        """Register a QWebEngineScript so hooks run on subframes too."""
+        try:
+            print("Installing persistent screenshot hook script (subframes enabled)…")
+            script = QWebEngineScript()
+            script.setName("LostKitScreenshotHook")
+            script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+            script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+            script.setRunsOnSubFrames(True)
+            script.setSourceCode(
+                """
+                (function() {
+                    const CUSTOM_URL = 'lostkit://take-screenshot';
+                    function triggerLostKit() {
+                        try { window.location.href = CUSTOM_URL; } catch (err) {}
+                    }
+                    function attachTo(el) {
+                        if (!el || el.__lostkitScreenshotAttached) { return; }
+                        function handler(ev) {
+                            try { ev.preventDefault(); } catch (e) {}
+                            try { ev.stopPropagation(); } catch (e) {}
+                            try { ev.stopImmediatePropagation(); } catch (e) {}
+                            triggerLostKit();
+                            return false;
+                        }
+                        el.addEventListener('click', handler, true);
+                        try { el.onclick = handler; } catch (e) {}
+                        try { el.setAttribute('href', CUSTOM_URL); } catch (e) {}
+                        el.__lostkitScreenshotAttached = true;
+                    }
+                    function install() {
+                        try { if (document.getElementById('screenshot')) attachTo(document.getElementById('screenshot')); } catch (e) {}
+                        try {
+                            const nodes = Array.from(document.querySelectorAll('[onclick]'));
+                            for (const el of nodes) {
+                                try { const v = String(el.getAttribute('onclick')||'').toLowerCase(); if (v.indexOf('savescreenshot') !== -1) { attachTo(el); break; } } catch (e) {}
+                            }
+                        } catch (e) {}
+                    }
+                    if (document.readyState === 'loading') {
+                        document.addEventListener('DOMContentLoaded', install);
+                    } else {
+                        install();
+                    }
+                    try {
+                        var ELEMENT_NODE = (window.Node && Node.ELEMENT_NODE) || 1;
+                        const obs = new MutationObserver(function(muts){
+                            for (const m of muts) {
+                                for (const n of m.addedNodes) {
+                                    if ((n.nodeType||ELEMENT_NODE) === ELEMENT_NODE) {
+                                        if ((n.id && n.id==='controls') || (n.querySelector && n.querySelector('#screenshot'))) {
+                                            install();
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        obs.observe(document.documentElement||document.body,{childList:true,subtree:true});
+                    } catch (e) {}
+                })();
+                """
+            )
+            # Insert only once
+            scripts = self.page().scripts()
+            for s in scripts:  # PyQt6 lets iteration
+                try:
+                    if s.name() == "LostKitScreenshotHook":
+                        return
+                except Exception:
+                    pass
+            scripts.insert(script)
+        except Exception as e:
+            print(f"Error installing screenshot script: {e}")
 
     def get_zoom_percentage(self):
         """Get current zoom as percentage string"""

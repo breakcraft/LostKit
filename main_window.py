@@ -430,7 +430,6 @@ class MainWindow(QMainWindow):
         
         self.game_view = GameViewWidget(game_url)
         self.game_view.instance_id = self.instance_id
-        self.game_view.screenshot_requested.connect(self.capture_screenshot)
         
         # Connect to URL changes to update world info
         self.game_view.page().urlChanged.connect(self.on_game_url_changed)
