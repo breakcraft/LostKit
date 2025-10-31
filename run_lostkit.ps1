@@ -11,11 +11,11 @@ if (-not (Test-Path $venvPython)) {
 }
 
 Write-Host "Launching LostKit with $venvPython"
-pushd $root
+Push-Location $root
 try {
     & $venvPython 'main.py' @Args
     exit $LASTEXITCODE
 }
 finally {
-    popd
+    Pop-Location
 }

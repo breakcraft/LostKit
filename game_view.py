@@ -7,6 +7,38 @@ from PyQt6.QtCore import Qt, QUrl, QDir, pyqtSignal, QTimer
 import config
 
 
+class GamePage(QWebEnginePage):
+    """Custom page that blocks back/forward navigation on protected URLs."""
+
+    def __init__(self, profile, parent=None):
+        super().__init__(profile, parent)
+        self._blocked_back_patterns = []
+
+    def set_blocked_back_patterns(self, patterns):
+        self._blocked_back_patterns = [pattern.lower() for pattern in patterns or []]
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+        if (nav_type == QWebEnginePage.NavigationType.BackForward and
+                self._should_block_back_forward()):
+            print("Blocked back/forward navigation while on LostCity client.")
+            return False
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
+    def _should_block_back_forward(self):
+        try:
+            view = self.view()
+            if view is None:
+                return False
+            current = view.url()
+            if not current.isValid():
+                return False
+            current_str = current.toString().lower()
+            return any(current_str.startswith(pattern) for pattern in self._blocked_back_patterns)
+        except Exception as e:
+            print(f"Error checking back navigation: {e}")
+            return False
+
+
 class GameViewWidget(QWebEngineView):
     zoom_changed = pyqtSignal(float)
     
@@ -55,7 +87,11 @@ class GameViewWidget(QWebEngineView):
                 settings.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, False)
                 settings.setAttribute(QWebEngineSettings.WebAttribute.TouchIconsEnabled, False)
 
-            page = QWebEnginePage(profile, self)
+            page = GamePage(profile, self)
+            page.set_blocked_back_patterns(
+                ["https://2004.lostcity.rs/client"]
+            )
+            page.setView(self)
             self.setPage(page)
             
             # Store paths for cleanup (but don't delete persistent data)
@@ -198,6 +234,50 @@ class GameViewWidget(QWebEngineView):
             self.zoom_changed.emit(self.zoom_factor)
         except Exception as e:  # FIXED: Added 'as e' here
             print(f"Error zooming out: {e}")
+
+    def mousePressEvent(self, event):
+        """Block navigation mouse buttons from leaving the game page."""
+        try:
+            if (self._is_navigation_mouse_button(event.button()) and
+                    self._should_block_navigation_buttons()):
+                event.accept()
+                return
+        except Exception as e:
+            print(f"Error filtering mousePressEvent: {e}")
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Block navigation mouse buttons from leaving the game page."""
+        try:
+            if (self._is_navigation_mouse_button(event.button()) and
+                    self._should_block_navigation_buttons()):
+                event.accept()
+                return
+        except Exception as e:
+            print(f"Error filtering mouseReleaseEvent: {e}")
+        super().mouseReleaseEvent(event)
+
+    @staticmethod
+    def _is_navigation_mouse_button(button):
+        """Return True if the mouse button is a navigation side button."""
+        navigation_buttons = [
+            getattr(Qt.MouseButton, name, None)
+            for name in ("BackButton", "ForwardButton", "XButton1", "XButton2")
+        ]
+        navigation_buttons = [btn for btn in navigation_buttons if btn is not None]
+        return any(button == btn for btn in navigation_buttons)
+
+    def _should_block_navigation_buttons(self):
+        """Return True when the current URL matches the LostCity client."""
+        try:
+            current_url = self.page().url()
+            if not current_url.isValid():
+                return False
+            url_str = current_url.toString().lower()
+            return url_str.startswith("https://2004.lostcity.rs/client")
+        except Exception as e:
+            print(f"Error evaluating current game URL: {e}")
+            return False
 
     def get_zoom_percentage(self):
         """Get current zoom as percentage string"""
