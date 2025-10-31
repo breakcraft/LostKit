@@ -6,12 +6,33 @@ from pathlib import Path
 from datetime import datetime
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineSettings, QWebEngineScript
-from PyQt6.QtCore import Qt, QUrl, QDir, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QUrl, QDir, pyqtSignal, QTimer, QEvent
 try:
     from zoneinfo import ZoneInfo
 except Exception:
     ZoneInfo = None
 import config
+
+
+def _is_lostcity_game_client_url(qurl):
+    """Return True if the given QUrl points at the LostCity game client (world rs2.cgi or base /client)."""
+    try:
+        if not qurl or not qurl.isValid():
+            return False
+        host = (qurl.host() or "").lower()
+        path = (qurl.path() or "").lower()
+        # Base client page
+        if host == "2004.lostcity.rs" and path.startswith("/client"):
+            return True
+        # World servers like w2-2004.lostcity.rs running the game under /rs2.cgi
+        if host.endswith("-2004.lostcity.rs"):
+            # Prefix like w2, w3, etc.
+            prefix = host.split("-", 1)[0]
+            if prefix.startswith("w") and path.startswith("/rs2.cgi"):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 class GamePage(QWebEnginePage):
@@ -21,12 +42,16 @@ class GamePage(QWebEnginePage):
         super().__init__(profile, parent)
         self._blocked_back_patterns = []
         self._screenshot_handler = None
+        self._click_log_handler = None
 
     def set_blocked_back_patterns(self, patterns):
         self._blocked_back_patterns = [pattern.lower() for pattern in patterns or []]
 
     def set_screenshot_handler(self, handler):
         self._screenshot_handler = handler
+
+    def set_click_log_handler(self, handler):
+        self._click_log_handler = handler
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):
         try:
@@ -39,11 +64,41 @@ class GamePage(QWebEnginePage):
         except Exception as e:
             print(f"Error handling custom navigation: {e}")
 
-        if (nav_type == QWebEnginePage.NavigationType.BackForward and
+        if (nav_type == QWebEnginePage.NavigationType.NavigationTypeBackForward and
                 self._should_block_back_forward()):
             print("Blocked back/forward navigation while on LostCity client.")
             return False
         return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
+    def triggerAction(self, action, checked=False):
+        """Block Back action while on the game client, as an extra safeguard."""
+        try:
+            if action == QWebEnginePage.WebAction.Back and self._should_block_back_forward():
+                print("Blocked Back web action while on LostCity client.")
+                return
+        except Exception:
+            pass
+        return super().triggerAction(action, checked)
+
+    # Capture console logs from JS and forward special click markers
+    def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
+        try:
+            if isinstance(message, str) and message.startswith('@@CLICK@@ '):
+                payload = message[len('@@CLICK@@ '):]
+                if callable(self._click_log_handler):
+                    self._click_log_handler(payload)
+        except Exception as e:
+            print(f"Error processing click console message: {e}")
+        # Also print all console messages for visibility
+        try:
+            print(f"JS[{level}] {sourceID}:{lineNumber}: {message}")
+        except Exception:
+            pass
+        try:
+            return super().javaScriptConsoleMessage(level, message, lineNumber, sourceID)
+        except Exception:
+            # Some bindings may not require calling super
+            return None
 
     def _should_block_back_forward(self):
         try:
@@ -53,6 +108,9 @@ class GamePage(QWebEnginePage):
             current = view.url()
             if not current.isValid():
                 return False
+            # Block for known game client URLs OR any configured static prefixes
+            if _is_lostcity_game_client_url(current):
+                return True
             current_str = current.toString().lower()
             return any(current_str.startswith(pattern) for pattern in self._blocked_back_patterns)
         except Exception as e:
@@ -121,7 +179,8 @@ class GameViewWidget(QWebEngineView):
                 ["https://2004.lostcity.rs/client"]
             )
             page.set_screenshot_handler(self.handle_screenshot_request)
-            page.setView(self)
+            page.set_click_log_handler(self._handle_click_log)
+            # QWebEnginePage has no setView() in PyQt6; binding to the view is done via setPage()
             self.setPage(page)
 
             # Route all downloads (e.g., game client screenshots) to LCScreenshots
@@ -143,9 +202,15 @@ class GameViewWidget(QWebEngineView):
 
             # Install screenshot hook script to run on all frames
             self.install_screenshot_script()
+            # Install click logger across all frames
+            self.install_click_logger_script()
 
             # Connect signals
             self.page().loadFinished.connect(self.on_load_finished)
+            try:
+                self.urlChanged.connect(self._on_url_changed)
+            except Exception:
+                pass
             
             # Enable focus for keyboard events
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -214,6 +279,16 @@ class GameViewWidget(QWebEngineView):
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts"""
         try:
+            # Block navigation keys while on the game client
+            try:
+                if self._should_block_navigation_buttons():
+                    if (event.key() in (getattr(Qt.Key, 'Key_Back', None), getattr(Qt.Key, 'Key_Backspace', None)) or
+                        (event.modifiers() & Qt.KeyboardModifier.AltModifier and event.key() == Qt.Key.Key_Left)):
+                        event.accept()
+                        return
+            except Exception:
+                pass
+
             if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
                 if event.key() == Qt.Key.Key_0:
                     # Ctrl+0: Reset zoom to 100%
@@ -244,6 +319,72 @@ class GameViewWidget(QWebEngineView):
         except Exception as e:
             print(f"Error in keyPressEvent: {e}")
             super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        """Also block navigation key releases to avoid fallback handling."""
+        try:
+            if self._should_block_navigation_buttons():
+                if (event.key() in (getattr(Qt.Key, 'Key_Back', None), getattr(Qt.Key, 'Key_Backspace', None)) or
+                    (event.modifiers() & Qt.KeyboardModifier.AltModifier and event.key() == Qt.Key.Key_Left)):
+                    event.accept()
+                    return
+        except Exception:
+            pass
+        super().keyReleaseEvent(event)
+
+    # Intercept view-level back/forward programmatic calls
+    def back(self):
+        try:
+            if self._should_block_navigation_buttons():
+                print("Blocked view.back() while on LostCity client.")
+                return
+        except Exception:
+            pass
+        return super().back()
+
+    def forward(self):
+        try:
+            if self._should_block_navigation_buttons():
+                print("Blocked view.forward() while on LostCity client.")
+                return
+        except Exception:
+            pass
+        return super().forward()
+
+    def _apply_game_nav_lock(self):
+        """Disable back navigation and clear history when on game client."""
+        try:
+            if not self._should_block_navigation_buttons():
+                # Re-enable back action when not on client
+                try:
+                    act = self.page().action(QWebEnginePage.WebAction.Back)
+                    if act:
+                        act.setEnabled(True)
+                except Exception:
+                    pass
+                return
+            # On client: clear history and disable back action
+            try:
+                hist = self.page().history()
+                if hist:
+                    hist.clear()
+            except Exception:
+                pass
+            try:
+                act = self.page().action(QWebEnginePage.WebAction.Back)
+                if act:
+                    act.setEnabled(False)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"Error applying nav lock: {e}")
+
+    def _on_url_changed(self, qurl):
+        # Update nav lock whenever URL changes
+        try:
+            self._apply_game_nav_lock()
+        except Exception as e:
+            print(f"Error updating nav lock on URL change: {e}")
 
     def reset_zoom(self):
         """Reset zoom to 100%"""
@@ -297,6 +438,28 @@ class GameViewWidget(QWebEngineView):
             print(f"Error filtering mouseReleaseEvent: {e}")
         super().mouseReleaseEvent(event)
 
+    def event(self, event):
+        """Swallow navigation side button clicks before default handling."""
+        try:
+            if event.type() in (
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.MouseButtonRelease,
+                QEvent.Type.MouseButtonDblClick,
+            ):
+                # Avoid strict isinstance to be robust across bindings
+                btn = None
+                try:
+                    # QMouseEvent has button(); other events may not
+                    btn = event.button() if hasattr(event, 'button') else None
+                except Exception:
+                    btn = None
+                if btn is not None and self._is_navigation_mouse_button(btn) and self._should_block_navigation_buttons():
+                    event.accept()
+                    return True
+        except Exception as e:
+            print(f"Error in generic event filter: {e}")
+        return super().event(event)
+
     @staticmethod
     def _is_navigation_mouse_button(button):
         """Return True if the mouse button is a navigation side button."""
@@ -313,8 +476,9 @@ class GameViewWidget(QWebEngineView):
             current_url = self.page().url()
             if not current_url.isValid():
                 return False
-            url_str = current_url.toString().lower()
-            return url_str.startswith("https://2004.lostcity.rs/client")
+            if _is_lostcity_game_client_url(current_url):
+                return True
+            return False
         except Exception as e:
             print(f"Error evaluating current game URL: {e}")
             return False
@@ -672,14 +836,19 @@ class GameViewWidget(QWebEngineView):
                 })();
                 """
             )
-            # Insert only once
+            # Insert script (avoid iteration; PyQt6 scripts collection may not be iterable)
             scripts = self.page().scripts()
-            for s in scripts:  # PyQt6 lets iteration
-                try:
-                    if s.name() == "LostKitScreenshotHook":
-                        return
-                except Exception:
-                    pass
+            try:
+                if hasattr(scripts, 'findScript'):
+                    existing = scripts.findScript("LostKitScreenshotHook")
+                    try:
+                        # Remove existing to ensure a single copy
+                        if existing and getattr(existing, 'name', None) and existing.name() == "LostKitScreenshotHook":
+                            scripts.remove(existing)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             scripts.insert(script)
         except Exception as e:
             print(f"Error installing screenshot script: {e}")
@@ -707,3 +876,113 @@ class GameViewWidget(QWebEngineView):
         print("Game view closed - login data preserved")
         
         super().closeEvent(event)
+
+    def _handle_click_log(self, json_text: str):
+        """Append click-log JSON line to logs/clicks.jsonl and echo to console."""
+        try:
+            logs_dir = Path(__file__).resolve().parent / 'logs'
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            log_path = logs_dir / 'clicks.jsonl'
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json_text.strip() + '\n')
+            print(f"CLICK {json_text}")
+        except Exception as e:
+            print(f"Error writing click log: {e}")
+
+    def install_click_logger_script(self):
+        """Register a script that logs every click with useful element details."""
+        try:
+            script = QWebEngineScript()
+            script.setName("LostKitClickLogger")
+            script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+            script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+            script.setRunsOnSubFrames(True)
+            script.setSourceCode(
+                """
+                (function(){
+                  if (window.__lostkitClickLoggerInstalled) return; 
+                  window.__lostkitClickLoggerInstalled = true;
+
+                  function isScreenshotElement(el){
+                    try {
+                      if (!el) return false;
+                      if (el.getAttribute && el.getAttribute('data-lostkit-screenshot') === '1') return true;
+                      const id = (el.id||'').toLowerCase();
+                      if (id === 'screenshot') return true;
+                      const txt = String((el.textContent||'')).trim().toLowerCase();
+                      if (txt === 'take screenshot' || txt.indexOf('screenshot') !== -1) return true;
+                      const oc = String((el.getAttribute && el.getAttribute('onclick'))||'').toLowerCase();
+                      if (oc.indexOf('savescreenshot') !== -1) return true;
+                    } catch (e) {}
+                    return false;
+                  }
+
+                  function nodeLabel(n){
+                    try {
+                      if (!n || !n.tagName) return 'UNKNOWN';
+                      let s = n.tagName.toLowerCase();
+                      if (n.id) s += '#' + n.id;
+                      if (n.className && typeof n.className === 'string') s += '.' + n.className.trim().split(/\s+/).slice(0,4).join('.');
+                      return s;
+                    } catch (e) { return 'UNKNOWN'; }
+                  }
+
+                  function buildPath(ev){
+                    try {
+                      const p = (ev.composedPath && ev.composedPath()) || [];
+                      if (p && p.length) return p.map(nodeLabel).slice(0,12);
+                    } catch (e) {}
+                    // Fallback: simple parent chain
+                    try {
+                      const arr = []; let cur = ev.target; let i=0;
+                      while (cur && i++ < 12) { arr.push(nodeLabel(cur)); cur = cur.parentNode; }
+                      return arr;
+                    } catch (e) { return []; }
+                  }
+
+                  function trim(s, n){ try { s = String(s||''); return s.length>n ? s.slice(0,n) : s; } catch(e){ return ''; } }
+
+                  document.addEventListener('click', function(ev){
+                    try {
+                      const t = ev.target;
+                      const href = (t && t.getAttribute && t.getAttribute('href')) || '';
+                      const onclick = (t && t.getAttribute && t.getAttribute('onclick')) || '';
+                      const payload = {
+                        ts: new Date().toISOString(),
+                        type: 'click',
+                        pageUrl: String(location.href||''),
+                        clientX: ev.clientX||0,
+                        clientY: ev.clientY||0,
+                        target: {
+                          tag: (t && t.tagName ? t.tagName.toLowerCase() : 'unknown'),
+                          id: (t && t.id) || '',
+                          class: (t && typeof t.className==='string' ? t.className : ''),
+                          text: trim((t && t.textContent) || '', 120),
+                          href: href || '',
+                          onclick: trim(onclick, 160)
+                        },
+                        path: buildPath(ev),
+                        isScreenshotIntent: isScreenshotElement(t)
+                      };
+                      console.log('@@CLICK@@ ' + JSON.stringify(payload));
+                    } catch (e) {
+                      try { console.log('@@CLICK@@ ' + JSON.stringify({ ts: new Date().toISOString(), err: String(e) })); } catch (ee) {}
+                    }
+                  }, true);
+                })();
+                """
+            )
+            scripts = self.page().scripts()
+            try:
+                if hasattr(scripts, 'findScript'):
+                    existing = scripts.findScript("LostKitClickLogger")
+                    try:
+                        if existing and getattr(existing, 'name', None) and existing.name() == "LostKitClickLogger":
+                            scripts.remove(existing)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            scripts.insert(script)
+        except Exception as e:
+            print(f"Error installing click logger script: {e}")

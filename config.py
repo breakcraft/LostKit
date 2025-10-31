@@ -1,16 +1,10 @@
 # config.py - Fixed for persistent storage and proper config saving
 import json
 import os
-import shutil
 import threading
 import time
 from pathlib import Path
 from PyQt6.QtCore import QStandardPaths
-
-# Store application data within the repository for full control over cache/state
-_REPO_ROOT = Path(__file__).resolve().parent
-_REPO_APP_DATA_DIR = _REPO_ROOT / "app_data"
-_legacy_migration_attempted = False
 
 # Thread-safe config access
 _config_lock = threading.RLock()
@@ -19,68 +13,21 @@ _cache_time = 0
 CACHE_DURATION = 2  # Reduced cache duration for more responsive config saving
 
 
-def _migrate_legacy_app_data(repo_dir: Path):
-    """Copy existing data from the previous AppData location into the repo."""
-    try:
-        legacy_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-        if not legacy_path:
-            return
-
-        legacy_dir = Path(legacy_path)
-        if not legacy_dir.exists():
-            return
-
-        if repo_dir.resolve() == legacy_dir.resolve():
-            return
-
-        # Only migrate when the repository directory is still empty.
-        if any(repo_dir.iterdir()):
-            return
-
-        legacy_items = list(legacy_dir.iterdir())
-        if not legacy_items:
-            return
-
-        print(f"Migrating existing app data from {legacy_dir} to {repo_dir}")
-        for item in legacy_items:
-            destination = repo_dir / item.name
-            try:
-                if item.is_dir():
-                    shutil.copytree(item, destination)
-                elif item.is_file():
-                    shutil.copy2(item, destination)
-            except Exception as copy_error:
-                print(f"Warning: Could not copy {item} during migration: {copy_error}")
-    except Exception as migration_error:
-        print(f"Warning: Could not migrate existing app data: {migration_error}")
-
-
-def _ensure_repo_app_data_dir() -> Path:
-    """Create the repository-backed app data directory and migrate legacy data once."""
-    global _legacy_migration_attempted
-
-    repo_dir = _REPO_APP_DATA_DIR
-    repo_dir.mkdir(parents=True, exist_ok=True)
-
-    if not _legacy_migration_attempted:
-        _legacy_migration_attempted = True
-        _migrate_legacy_app_data(repo_dir)
-
-    return repo_dir
-
-
 def get_app_data_dir():
-    """Get persistent application data directory located inside the repository."""
+    """Get persistent application data directory using the user's AppData location."""
     try:
-        repo_dir = _ensure_repo_app_data_dir()
-        return str(repo_dir)
+        app_data_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+        if app_data_dir:
+            app_path = Path(app_data_dir)
+            app_path.mkdir(parents=True, exist_ok=True)
+            return str(app_path)
     except Exception as e:
-        print(f"Warning: Could not access repository app data directory: {e}")
+        print(f"Warning: Could not create system app data directory: {e}")
 
-    # Absolute fallback to a local directory if repository handling fails completely
-    local_dir = Path("app_data").resolve()
-    local_dir.mkdir(exist_ok=True)
-    return str(local_dir)
+    # Fallback to a hidden directory under the user's home if system path is unavailable
+    fallback_dir = Path.home() / ".lostkit_app_data"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    return str(fallback_dir)
 
 def get_config_path():
     """Get persistent config file path"""
